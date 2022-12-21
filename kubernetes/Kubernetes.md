@@ -51,7 +51,7 @@
 - **Mesos**：Apache的一个资源统一管控的工具，需要和Marathon结合使用
 - **Kubernetes**：Google开源的的容器编排工具
 
-![image-20200524150339551](Kubernetes.assets/image-20200524150339551.png)
+![image-20221018153727055](.\Kubernetes.assets\image-20221018153727055.png)
 
 ## kubernetes简介
 
