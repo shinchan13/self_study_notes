@@ -1,5 +1,3 @@
-
-
 # Kubernetes介绍
 
 ## 云原生的代表技术
@@ -4947,6 +4945,23 @@ kubernetes的Volume支持多种类型，比较常见的有下面几个：
 
 
 
+
+
+**常见的卷类型**
+
+- 临时卷（ephemeral volume）:与pod一起创建和删除，生命周期和pod相同
+  - emptyDir 作为缓存或者存储日志
+  - configmap，secret，downwarAPI 给pod注入数据
+- 持久卷（persistent volume）：删除pod后，持久卷不会被删除
+  - 本地存储   hostpath，local
+  - 网络存储   NFS
+  - 分布式存储  Ceph（cephfs文件存储，rbd块存储）
+- 投射卷（projected volumes）：projected 卷可以将多个卷映射到同一个目录上
+
+
+
+
+
 ## 基本存储
 
 ### EmptyDir
@@ -5086,8 +5101,6 @@ access.log  error.log
 
 # 同样的道理，如果在此目录下创建一个文件，到容器中也是可以看到的
 ```
-
-typora
 
 
 
@@ -6267,4 +6280,313 @@ ca.crt:     1025 bytes
 
 
 
+
+# 运行一个有状态的应用
+
+
+
+以mysql为例，在kubernetes集群中运行一个有状态的应用。
+
+部署数据库几乎覆盖了kubernetes中常见的对象和概念：
+
+- 配置文件--configmap
+- 保存密码--secret
+- 数据存储--pv和pvc
+- 动态创建卷--存储类（storageclass）
+- 部署多个实例--statefulset
+- 数据库访问--headless service
+- 主从复制--初始化容器和sidecar
+- 数据库调试--port-forward
+- 部署MySQL集群--helm
+
+
+
+1. 创建一个MySQL实例
+
+   - 在home目录下创建一个名为MySQL的文件夹，存放配置文件
+
+     ```BASH
+     mkdir mysql
+     ```
+
+   - 创建一个mysql-pod.yaml文件
+
+     - 创建mysql需要  配置环境变量: 
+
+       使用mysql镜像创建pod，需要使用环境变量设置mysql的初始密码
+
+     - 挂载卷
+
+
+   ​    
+
+     ```yaml
+     # 创建 Pod 时，可以为其下的容器设置环境变量
+     # 通过配置文件的 env 或者 envFrom 字段来设置环境变量。
+     apiVersion: v1
+     kind: Pod
+     metadata:
+       name: mysql-pod
+       labels: app:mysql
+     spec:
+       containers:
+         - name: mysql
+           image: mysql:5.7
+           env: # 可以在dockerhub中查看mysql的用法
+             - name: MYSQL_ROOT_PASSWORD
+               value: "123456"
+           volumemounts:
+             - mountpath: /var/lib/msql #在dockerhub中查看mysql的用法，可知mysql镜像中存储数据的目录是/var/lib/msql，该目录是 容器中的目录
+               name: data-volume
+     
+       # 挂载卷
+       volumes:
+         - name: data-volume
+           hostPath:
+             # directory location on host
+             path: /home/mysql/data
+             # this field is optional
+             type: DirectoryOrCreate
+     
+     ```
+
+     
+
+   - ```bash
+     kubectl apply -f mysql-pod.yaml
+     ```
+
+   - 查看home/mysql/data是否生成了mysql的数据
+
+   
+
+2. 通常需要使用自己的mysql配置文件，在kubernetes集群中，容器可能被调度到任意的节点，配置文件需要能在集群的任意节点上访问、分发和更新，这就需要使用到configmap：
+
+   ![image-20221222102804767](./Kubernetes.assets/image-20221222102804767.png)
+
+   - configmap配置
+
+     ```bash
+     apiVersion: v1
+     kind: ConfigMap
+     metadata:
+       name: mysql-config
+     data:
+       mysql.cof: |
+         配置信息
+     ```
+
+   - pod中使用configmap
+
+     ```yaml
+     apiVersion: v1
+     kind: Pod
+     metadata:
+       name: mysql-pod
+       labels: app:mysql
+     spec:
+       containers:
+         - name: mysql
+           image: mysql:5.7
+           env: # 可以在dockerhub中查看mysql的用法
+             - name: MYSQL_ROOT_PASSWORD
+               value: "123456"
+           volumemounts:
+             - mountpath: /var/lib/msql #在dockerhub中查看mysql的用法，可知mysql镜像中存储数据的目录是/var/lib/msql，该目录是 容器中的目录
+               name: data-volume
+             - mountpath: /etc/mysql/conf.d # mysql的配置文件路径
+               name: config-volume
+               readonly: true
+       volumes: # 创建一个卷来注入配置文件
+       - name: config-volume
+         configMap:
+           name: mysql-config
+       - name: data-volume
+         hostPath:
+          # directory location on host
+           path: /home/mysql/data
+          # this field is optional
+           type: DirectoryOrCreate
+     ```
+
+3. secret用于保存机密数据的对象，一般用于保存密码、令牌和密钥
+
+   data字段用于存储base64编码数据
+
+   stringdata存储为编码的字符串
+
+   secret意味着不需要在应用程序代码中包含机密数据
+
+   - secret配置
+
+   ```yaml
+   apiVersion: v1
+   kind: Secret
+   metadata:
+     name: mysql-password
+   type: Opaque
+   data:
+     PASSWORD: MWYyZDFlMmU2N2Rm
+   ```
+
+   - 将secret用作环境变量
+
+   ```yaml
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: mysql-pod
+     labels: app:mysql
+   spec:
+     containers:
+       - name: mysql
+         image: mysql:5.7
+         env: # 可以在dockerhub中查看mysql的用法
+           - name: MYSQL_ROOT_PASSWORD
+             valueFrom:
+              secretKeyRef:
+               name: mysql-password
+               key: PASSWORD
+               optional: false # 此值为默认值；意味着 "mysql-password"必须存在且包含名为 "PASSWORD" 的主键
+         volumemounts:
+           - mountpath: /var/lib/msql #在dockerhub中查看mysql的用法，可知mysql镜像中存储数据的目录是/var/lib/msql，该目录是 容器中的目录
+             name: data-volume
+           - mountpath: /etc/mysql/conf.d # mysql的配置文件路径
+             name: config-volume
+             readonly: true
+     volumes: # 创建一个卷来注入配置文件
+     - name: config-volume
+       configMap:
+         name: mysql-config
+     - name: data-volume
+       hostPath:
+        # directory location on host
+         path: /home/mysql/data
+        # this field is optional
+         type: DirectoryOrCreate
+   ```
+
+4. pv和pvc
+
+5. 存储类（storageclass）
+
+   一个集群可以存在多个存储类，来创建和管理不同类新的存储
+
+   每一个storageclass都有一个制备器（provisioner），用来决定使用哪个卷插件 制备pv
+
+   ![image-20221222134942966](./Kubernetes.assets/image-20221222134942966.png)
+
+   k3s自带了一个名为local-path的存储类，它支持动态创建 基于hostpath或local的持久卷。创建pvc后，会自动的创建pv，不需要再去手动创建pv。删除pvc，pv也会自动删除。
+
+6. statefulset（有状态应用集）
+
+   如果我们要部署多个MySQL实例，就需要用到statefulset
+
+   statefulset是用来管理有状态的应用。一般用于管理数据库、缓存等。
+
+   与deployment类似，statefulset用来管理pod集合的部署和扩缩。
+
+   deployment用来部署无状态应用，statefulset用来部署有状态的应用
+
+   ```yaml
+   apiVersion: apps/v1
+   kind: StatefulSet
+   metadata:
+     name: mysql-sts
+   spec:
+     selector:
+       matchLabels:
+         app: mysql # 必须匹配 .spec.template.metadata.labels
+     serviceName: "mysql-svc"
+     replicas: 3 # 默认值是 1
+     minReadySeconds: 10 # 默认值是 0
+     template:
+       metadata:
+         labels:
+           app: mysql # 必须匹配 .spec.selector.matchLabels
+       spec:
+         terminationGracePeriodSeconds: 10
+         containers:
+          - name: mysql
+            image: mysql:5.7
+            env: # 可以在dockerhub中查看mysql的用法
+             - name: MYSQL_ROOT_PASSWORD
+               value: "123456"
+            volumemounts:
+             - mountpath: /var/lib/msql #在dockerhub中查看mysql的用法，可知mysql镜像中存储数据的目录是/var/lib/msql，该目录是 容器中的目录
+             name: data-volume
+     volumeClaimTemplates:
+     - metadata:
+         name: data-volume
+       spec:
+         accessModes: [ "ReadWriteOnce" ]
+         storageClassName: "local-path"
+         resources:
+           requests:
+             storage: 2Gi
+   ```
+
+7. statefulset通常配合headless service使用
+
+   上一步创建了三个各自独立的数据库实例，要想别的容器访问数据库，需要将他发布为service，但是service带负载均衡功能，每次请求都会转发给不同的数据库，这样子使用过程中会有很大的问题。
+
+   无头服务可以为statefulset成员提供稳定的dns地址
+
+   在不需要负载均衡的情况下，可以通过指定cluster ip的值为none来创建无头服务
+
+   ```yaml
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: mysql-svc
+     labels:
+       app: mysql-svc
+   spec:
+     ports:
+     - port: 3306
+       name: mysql
+     clusterIP: None
+     selector:
+       app: mysql
+   ```
+
+8. mysql主从复制
+
+   下面是部署一个读写分离的mysql数据库示意图
+
+   通过部署无头服务将写操作指向固定的数据库
+
+   部署一个service用来做读操作的负载均衡
+
+   数据库之间通过同步程序保持数据一致
+
+   ![image-20221222143008249](./Kubernetes.assets/image-20221222143008249.png)
+
+   
+
+​	  	 主从复制的过程和原理
+
+​      	每个pod中都包含两类容器：初始化容器和应用容器，初始化容器用来完成       初始化操作，应用容器中运行mysql服务，还有一个辅助的容器sidecar。
+
+![image-20221222144617130](./Kubernetes.assets/image-20221222144617130.png)
+
+​	pod中运行了两个容器，mysql和一个充当辅助工具的xtrabackup容器，称为边车。
+
+​	xtrabackup是一个开源的mysql备份工具，支持在线热备份（备份时不影响数据的读写）
+
+![image-20221222144904680](./Kubernetes.assets/image-20221222144904680.png)
+
+​	过程：
+
+​	首先启动一个主服务，主服务中先运行初始化容器，初始化容器有两个，依次运行，init-mysql负责将配置文件设置为primary.cnf，主服务上不用执行克隆。初	始化容器执行完之后，启动mysql和xtrabackup，mysql启动后会在数据目录下生成数据库文件data，xtrabackup检测到mysql启动成功后，将数据目录下的文	件进行备份，然后将备份发送给第二个pod。
+
+​	接着，第二个pod开始启动，还是先运行初始化容器，由于现在第二个mysql还没有启动，所以数据目录是空的，因此clone-mysql这个初始化容器将备份数据	放置在data，接着mysql服务启动，mysql初次启动 就可以读取到第一个mysql中的所有数据，然后xtrabackup从备份文件中读取备份结束的位置，将这个位置	发送给mysql，之后mysql就从结束位置之后开始同步新的数据。
+
+![image-20221222151352728](./Kubernetes.assets/image-20221222151352728.png)
+
+9. port-forward端口转发
+
+   ![image-20221222153613216](./Kubernetes.assets/image-20221222153613216.png)
+
+   
 
